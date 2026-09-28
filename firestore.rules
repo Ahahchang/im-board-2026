@@ -6,11 +6,25 @@ service cloud.firestore {
         && request.auth.token.email == "uponion129@gmail.com"
         && request.auth.token.email_verified == true;
     }
-    // 每份講義一筆：讀書進度、筆記、分類覆寫、標籤、弱點星號
+    // 每份講義一筆（公開）：讀書進度、分類覆寫、標籤、弱點星號
     match /docs/{docId} {
       allow read: if true;
       allow write: if isOwner()
-        && request.resource.data.keys().hasOnly(['status','note','category','tags','stars','updatedAt']);
+        && request.resource.data.keys().hasOnly(['status','category','tags','stars','updatedAt']);
+    }
+    // 我的筆記（私人）：只有擁有者能讀寫
+    match /private/{docId} {
+      allow read, delete: if isOwner();
+      allow create, update: if isOwner()
+        && request.resource.data.keys().hasOnly(['note','updatedAt']);
+    }
+    // 我的筆記裡的圖片（私人，壓縮後的 data URL，每張 < 1MB）
+    match /noteImages/{imgId} {
+      allow read, delete: if isOwner();
+      allow create: if isOwner()
+        && request.resource.data.keys().hasOnly(['docId','data','createdAt'])
+        && request.resource.data.data is string
+        && request.resource.data.data.size() < 1000000;
     }
     match /{document=**} {
       allow read, write: if false;

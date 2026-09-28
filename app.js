@@ -9,7 +9,10 @@ const view = $("#view");
 
 let LIB = { docs: [], generated: null };
 let DOCS = new Map();          // id -> doc (meta + body)
-let STATE = {};                // id -> firestore state
+let STATE = {};                // id -> firestore state（公開：進度、分類、標籤、星號）
+let PRIVATE = {};              // id -> { note }（只有擁有者讀得到）
+let privateReady = false;      // 私人筆記第一次載入完成
+let editing = null;            // 正在編輯「我的筆記」的講義 id
 let user = null;
 let fb = null;                 // firebase handles
 let filterCat = "全部";
@@ -34,6 +37,24 @@ function inline(s) {
   return h;
 }
 function stripInline(s) { return s.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\{\{[robgp]\|/g, "").replace(/\}\}/g, "").replace(/\*\*/g, ""); }
+
+/* ---------------- 我的筆記（私人）---------------- */
+// 語法：**粗體**、__底線__、{{紅|文字}}；圖片獨立一行 ![](noteimg:<id>)
+const PEN = { 紅: "red", 橘: "orange", 黃: "yellow", 綠: "green", 藍: "blue", 紫: "purple", 粉: "pink", 灰: "gray" };
+const PEN_RE = new RegExp(`\\{\\{(${Object.keys(PEN).join("|")})\\|((?:(?!\\{\\{|\\}\\}).)+)\\}\\}`, "g");
+const NIMG_RE = /^!\[\]\(noteimg:([\w-]+)\)$/;
+function inlineMine(s) {
+  let h = esc(s);
+  for (let i = 0; i < 3; i++) h = h.replace(PEN_RE, (_, c, t) => `<span class="pen pen-${PEN[c]}">${t}</span>`);
+  return h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/__(.+?)__/g, "<u>$1</u>");
+}
+function renderMine(text) {
+  return text.replace(/\r/g, "").split("\n").map(line => {
+    const m = line.trim().match(NIMG_RE);
+    return m ? `<img class="nimg" data-nimg="${esc(m[1])}" alt="我的圖片">` : `<div>${inlineMine(line) || "<br>"}</div>`;
+  }).join("");
+}
+const stripMine = s => s.replace(/!\[\]\(noteimg:[\w-]+\)/g, "［圖片］").replace(new RegExp(`\\{\\{(${Object.keys(PEN).join("|")})\\|`, "g"), "").replace(/\}\}|\*\*|__/g, "");
 
 // 解析成區塊：同時供渲染與搜尋使用
 function parse(doc) {
@@ -134,7 +155,7 @@ function search(q) {
         if (++hits >= 30) break;
       }
     }
-    const note = st(d.id).note || "";
+    const note = stripMine(PRIVATE[d.id]?.note || "");
     if (note && terms.every(t => note.toLowerCase().includes(t))) res.push({ d, path: ["我的筆記"], hid: "mynote", snip: note, score: 3 });
     if (titleHit && !hits) res.push({ d, path: [], hid: null, snip: "（講義名稱符合）", score: 1 });
   }
@@ -205,27 +226,139 @@ function docView(id, hid, q) {
   h += `<article class="note" id="note">${renderBlocks(d)}</article>`;
   h += `<section class="mynote" id="mynote"><h2>我的筆記</h2>`;
   if (isOwner()) {
-    h += `<textarea id="noteBox" placeholder="寫下易錯點、補充…（自動同步到你所有裝置）">${esc(s.note || "")}</textarea>
-      <div class="row"><label>科別 <select id="catSel">${[...new Set([...CATEGORIES, catOf(d)])].map(c => `<option${c === catOf(d) ? " selected" : ""}>${esc(c)}</option>`).join("")}</select></label>
-      <label>標籤 <input id="tagBox" value="${esc(tagsOf(d).join(", "))}" placeholder="以逗號分隔"></label><span class="muted" id="saveHint"></span></div>`;
-  } else h += s.note ? `<div class="view">${esc(s.note)}</div>` : `<p class="muted">登入後可以寫筆記。</p>`;
+    const note = PRIVATE[id]?.note || "";
+    if (editing === id) {
+      h += `<div class="pens" id="pens">
+        <button data-wrap="**" title="粗體"><b>B</b></button><button data-wrap="__" title="底線"><u>U</u></button>
+        ${Object.entries(PEN).map(([n, c]) => `<button data-pen="${n}" class="sw pen-${c}" title="${n}色" aria-label="${n}色">${n}</button>`).join("")}
+        <button id="imgBtn" title="加入圖片">📷 圖片</button><input type="file" id="imgFile" accept="image/*" multiple hidden>
+      </div>
+      <textarea id="noteBox" placeholder="寫下易錯點、補充…（可直接貼上截圖；自動同步到你所有裝置）">${esc(note)}</textarea>
+      <div class="row"><button class="btn" id="doneBtn">完成</button><span class="muted" id="saveHint"></span></div>
+      <div class="mine preview" id="notePreview">${renderMine(note)}</div>`;
+    } else {
+      h += note.trim() ? `<div class="mine" id="noteView">${renderMine(note)}</div>` : `<p class="muted">還沒有筆記。</p>`;
+      h += `<div class="row"><button class="btn" id="editBtn">${note.trim() ? "編輯" : "寫筆記"}</button><span class="muted">🔒 只有你登入後看得到</span></div>`;
+    }
+    h += `<div class="row"><label>科別 <select id="catSel">${[...new Set([...CATEGORIES, catOf(d)])].map(c => `<option${c === catOf(d) ? " selected" : ""}>${esc(c)}</option>`).join("")}</select></label>
+      <label>標籤 <input id="tagBox" value="${esc(tagsOf(d).join(", "))}" placeholder="以逗號分隔"></label></div>`;
+  } else h += `<p class="muted">🔒 我的筆記只有擁有者登入後才看得到。</p>`;
   h += `</section>`;
   view.innerHTML = h;
 
   $("#statusSeg").onclick = e => { const b = e.target.closest("button"); if (b) save(id, { status: b.dataset.s }); };
   $("#note").onclick = e => { const b = e.target.closest(".star"); if (b) toggleStar(d, b.dataset.hid); };
   if (isOwner()) {
-    const hint = $("#saveHint");
-    const saveNote = debounce(v => save(id, { note: v }).then(() => hint.textContent = "已同步"), 800);
-    $("#noteBox").oninput = e => { hint.textContent = "儲存中…"; saveNote(e.target.value); };
     $("#catSel").onchange = e => save(id, { category: e.target.value });
     $("#tagBox").onchange = e => save(id, { tags: e.target.value.split(/[,，、]/).map(x => x.trim()).filter(Boolean) });
+    if (editing === id) bindEditor(id); else if ($("#editBtn")) $("#editBtn").onclick = () => { editing = id; docView(id, "mynote"); $("#noteBox").focus(); };
+    loadNoteImages($("#mynote"));
   }
   if (q) markInDom($("#note"), norm(q).split(/\s+/).filter(Boolean));
   if (hid) {
     const el = document.getElementById(hid);
     if (el) { el.scrollIntoView({ block: "start" }); el.classList.add("flash"); }
   } else window.scrollTo(0, 0);
+}
+
+function bindEditor(id) {
+  const box = $("#noteBox"), hint = $("#saveHint"), prev = $("#notePreview");
+  const push = debounce(v => saveNote(id, v).then(ok => { if (ok) hint.textContent = "已同步"; }), 800);
+  const changed = () => {
+    PRIVATE[id] = { ...PRIVATE[id], note: box.value };
+    hint.textContent = "儲存中…"; push(box.value);
+    prev.innerHTML = renderMine(box.value); loadNoteImages(prev);
+  };
+  // 用 insertText 保留「復原」功能；不支援時退回 setRangeText
+  const put = (text, selFrom, selTo) => {
+    box.focus();
+    if (!document.execCommand("insertText", false, text)) box.setRangeText(text, box.selectionStart, box.selectionEnd, "end");
+    if (selFrom != null) box.setSelectionRange(selFrom, selTo);
+    changed();
+  };
+  const wrap = (open, close) => {
+    const a = box.selectionStart, b = box.selectionEnd, sel = box.value.slice(a, b);
+    put(open + sel + close, a + open.length, a + open.length + sel.length);
+  };
+  box.oninput = changed;
+  const pens = $("#pens");
+  pens.onmousedown = e => { if (e.target.closest("button")) e.preventDefault(); }; // 按按鈕時不要讓選取消失
+  pens.onclick = e => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.wrap) wrap(b.dataset.wrap, b.dataset.wrap);
+    else if (b.dataset.pen) wrap(`{{${b.dataset.pen}|`, "}}");
+  };
+  const addImages = async files => {
+    for (const f of files) {
+      if (!f.type.startsWith("image/")) continue;
+      hint.textContent = "上傳圖片中…";
+      try {
+        const imgId = await uploadNoteImage(id, f);
+        const a = box.selectionStart, before = box.value.slice(0, a);
+        put((before && !before.endsWith("\n") ? "\n" : "") + `![](noteimg:${imgId})\n`);
+      } catch (e) { console.error(e); toast("圖片上傳失敗：" + (e.code || e.message)); hint.textContent = ""; }
+    }
+  };
+  $("#imgBtn").onclick = () => $("#imgFile").click();
+  $("#imgFile").onchange = e => { addImages([...e.target.files]); e.target.value = ""; };
+  box.onpaste = e => {
+    const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+    if (files.length) { e.preventDefault(); addImages(files); }
+  };
+  $("#doneBtn").onclick = async () => {
+    editing = null;
+    await saveNote(id, box.value);
+    cleanupNoteImages(id, box.value);
+    docView(id, "mynote");
+  };
+}
+
+// 圖片壓縮成 webp（Safari 不支援時用 jpeg），存成 Firestore 文件（單一文件上限 1 MiB）
+async function compressImage(file) {
+  const bmp = await createImageBitmap(file);
+  for (const [side, q] of [[1600, 0.82], [1400, 0.75], [1200, 0.7], [1000, 0.65], [800, 0.6]]) {
+    const k = Math.min(1, side / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(bmp, 0, 0, c.width, c.height);
+    let url = c.toDataURL("image/webp", q);
+    if (!url.startsWith("data:image/webp")) url = c.toDataURL("image/jpeg", q);
+    if (url.length < 900000) return url;
+  }
+  throw new Error("圖片太大，請先裁切後再試");
+}
+async function uploadNoteImage(docId, file) {
+  const data = await compressImage(file);
+  const imgId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^\w]/g, "").slice(0, 24);
+  await fb.setDoc(fb.doc(fb.db, "noteImages", imgId), { docId, data, createdAt: fb.serverTimestamp() });
+  IMG_CACHE.set(imgId, data);
+  return imgId;
+}
+const IMG_CACHE = new Map();
+function loadNoteImages(root) {
+  if (!root || !fb) return;
+  root.querySelectorAll("img[data-nimg]").forEach(async img => {
+    const k = img.dataset.nimg;
+    img.onclick = () => openLightbox(img.src);
+    if (!IMG_CACHE.has(k)) {
+      try { const s = await fb.getDoc(fb.doc(fb.db, "noteImages", k)); IMG_CACHE.set(k, s.exists() ? s.data().data : ""); }
+      catch (e) { console.warn(e); return; }
+    }
+    if (IMG_CACHE.get(k)) img.src = IMG_CACHE.get(k); else img.alt = "（圖片已刪除）";
+  });
+}
+function openLightbox(src) {
+  if (!src) return;
+  const box = document.createElement("div"); box.className = "lightbox";
+  box.innerHTML = `<img src="${esc(src)}" alt="">`;
+  box.onclick = () => box.remove();
+  document.body.append(box);
+}
+// 按「完成」時，把筆記裡已經刪掉的圖片從資料庫清掉
+async function cleanupNoteImages(docId, text) {
+  try {
+    const snap = await fb.getDocs(fb.query(fb.collection(fb.db, "noteImages"), fb.where("docId", "==", docId)));
+    for (const s of snap.docs) if (!text.includes(`noteimg:${s.id})`)) { await fb.deleteDoc(s.ref); IMG_CACHE.delete(s.id); }
+  } catch (e) { console.warn("cleanup", e); }
 }
 
 function searchView(q) {
@@ -275,6 +408,7 @@ function route() {
   const [p, qs] = raw.split("?");
   const params = new URLSearchParams(qs || "");
   const parts = p.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] !== "d" || parts[1] !== editing) editing = null;
   if (parts[0] === "d") docView(parts[1], parts[2], params.get("q"));
   else if (parts[0] === "search") searchView(params.get("q") || "");
   else if (parts[0] === "weak") weakView();
@@ -291,6 +425,26 @@ async function save(id, patch) {
   try { await fb.setDoc(fb.doc(fb.db, "docs", id), { ...patch, updatedAt: fb.serverTimestamp() }, { merge: true }); }
   catch (e) { console.error(e); toast("同步失敗：" + (e.code || e.message)); }
 }
+async function saveNote(id, note) {
+  if (!isOwner()) { toast("請先用你的 Google 帳號登入"); return false; }
+  PRIVATE[id] = { ...PRIVATE[id], note };
+  try { await fb.setDoc(fb.doc(fb.db, "private", id), { note, updatedAt: fb.serverTimestamp() }, { merge: true }); return true; }
+  catch (e) { console.error(e); toast("同步失敗：" + (e.code || e.message)); return false; }
+}
+// 舊版把筆記存在公開的 docs/{id}.note：搬到私人的 private/{id}，再從公開文件刪掉
+let migrating = false;
+async function migrateNotes() {
+  if (migrating || !privateReady || !isOwner()) return;
+  migrating = true;
+  for (const [id, s] of Object.entries(STATE)) {
+    if (typeof s.note !== "string") continue;
+    try {
+      if (s.note.trim() && !PRIVATE[id]?.note && !(await saveNote(id, s.note))) continue; // 搬移失敗就不要刪原本的
+      await fb.updateDoc(fb.doc(fb.db, "docs", id), { note: fb.deleteField() });
+    } catch (e) { console.warn("migrate", id, e); }
+  }
+  migrating = false;
+}
 async function toggleStar(d, hid) {
   if (!isOwner()) { toast("請先登入才能標記"); return; }
   const stars = { ...(st(d.id).stars || {}) };
@@ -303,9 +457,9 @@ async function toggleStar(d, hid) {
 // 資料變動時重畫，但不打斷正在輸入的筆記
 function rerenderSoft() {
   const active = document.activeElement;
-  if (active && (active.id === "noteBox" || active.id === "tagBox")) {
+  if (editing || (active && (active.id === "noteBox" || active.id === "tagBox"))) {
     const hash = location.hash; const m = hash.match(/^#\/d\/([^/?]+)/);
-    if (m) { const d = DOCS.get(decodeURIComponent(m[1])); document.querySelectorAll(".star").forEach(b => { const on = !!(st(d.id).stars || {})[b.dataset.hid]; b.classList.toggle("on", on); b.textContent = on ? "★" : "☆"; });
+    if (m && DOCS.has(decodeURIComponent(m[1]))) { const d = DOCS.get(decodeURIComponent(m[1])); document.querySelectorAll(".star").forEach(b => { const on = !!(st(d.id).stars || {})[b.dataset.hid]; b.classList.toggle("on", on); b.textContent = on ? "★" : "☆"; });
       const s = st(d.id).status || "unread"; document.querySelectorAll("#statusSeg button").forEach(b => b.classList.toggle("on", b.dataset.s === s)); }
     return;
   }
@@ -324,14 +478,29 @@ async function initFirebase() {
   const a = app.initializeApp(CFG.firebase);
   const db = fs.initializeFirestore(a, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) });
   const au = auth.getAuth(a);
-  fb = { db, doc: fs.doc, setDoc: fs.setDoc, updateDoc: fs.updateDoc, serverTimestamp: fs.serverTimestamp };
+  fb = { db, doc: fs.doc, setDoc: fs.setDoc, updateDoc: fs.updateDoc, getDoc: fs.getDoc, getDocs: fs.getDocs, deleteDoc: fs.deleteDoc,
+    query: fs.query, collection: fs.collection, where: fs.where, deleteField: fs.deleteField, serverTimestamp: fs.serverTimestamp };
+  let unsubPrivate = null;
   fs.onSnapshot(fs.collection(db, "docs"), snap => {
     snap.docChanges().forEach(c => { if (c.type === "removed") delete STATE[c.doc.id]; else STATE[c.doc.id] = c.doc.data(); });
+    migrateNotes();
     rerenderSoft();
   }, e => console.warn("snapshot", e));
   auth.onAuthStateChanged(au, u => {
     user = u; btn.textContent = u ? (isOwner() ? "已登入" : "非擁有者") : "登入"; btn.classList.toggle("on", isOwner());
     if (u && !isOwner()) toast("這個帳號沒有編輯權限，只能瀏覽");
+    if (unsubPrivate) { unsubPrivate(); unsubPrivate = null; }
+    PRIVATE = {}; editing = null; privateReady = false;
+    if (isOwner()) {
+      unsubPrivate = fs.onSnapshot(fs.collection(db, "private"), snap => {
+        snap.docChanges().forEach(c => {
+          if (c.doc.id === editing) return; // 編輯中以本機內容為準
+          if (c.type === "removed") delete PRIVATE[c.doc.id]; else PRIVATE[c.doc.id] = c.doc.data();
+        });
+        privateReady = true; migrateNotes();
+        rerenderSoft();
+      }, e => { console.warn("private", e); toast("私人筆記讀取失敗：" + e.code); });
+    }
     rerenderSoft();
   });
   btn.onclick = async () => {
