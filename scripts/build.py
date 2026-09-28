@@ -28,6 +28,34 @@ def parse_front(text, name):
     return meta, m.group(2).strip() + "\n"
 
 
+def webp_size(path):
+    """讀 webp 檔頭取得寬高（不需額外套件）；讓前端預留圖片空間，捲動位置才不會跑掉。"""
+    b = path.read_bytes()[:30]
+    if b[:4] != b"RIFF" or b[8:12] != b"WEBP":
+        return None
+    kind = b[12:16]
+    if kind == b"VP8 ":
+        return int.from_bytes(b[26:28], "little") & 0x3FFF, int.from_bytes(b[28:30], "little") & 0x3FFF
+    if kind == b"VP8L":
+        v = int.from_bytes(b[21:25], "little")
+        return (v & 0x3FFF) + 1, ((v >> 14) & 0x3FFF) + 1
+    if kind == b"VP8X":
+        return int.from_bytes(b[24:27], "little") + 1, int.from_bytes(b[27:30], "little") + 1
+    return None
+
+
+def image_sizes(body):
+    sizes = {}
+    for src in re.findall(r"!\[[^\]]*\]\((img/[^)\s]+\.webp)\)", body):
+        p = ROOT / "data" / src
+        if not p.exists():
+            raise ValueError(f"找不到圖片 {src}")
+        wh = webp_size(p)
+        if wh:
+            sizes[src] = list(wh)
+    return sizes
+
+
 def main():
     docs, errors = [], []
     for f in sorted(NOTES.glob("*.md")):
@@ -39,7 +67,12 @@ def main():
         # 基本檢查：顏色標記要成對
         if body.count("{{") != body.count("}}"):
             errors.append(f"{f.name}: 顏色標記 {{{{ }}}} 數量不成對")
-        docs.append({**meta, "tags": meta.get("tags") or [], "file": f.name, "body": body})
+        try:
+            imgs = image_sizes(body)
+        except ValueError as e:
+            errors.append(f"{f.name}: {e}")
+            continue
+        docs.append({**meta, "tags": meta.get("tags") or [], "file": f.name, "body": body, "imgs": imgs})
     if errors:
         print("\n".join(errors), file=sys.stderr)
         sys.exit(1)

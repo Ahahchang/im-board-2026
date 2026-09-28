@@ -117,7 +117,8 @@ function renderBlocks(doc) {
     } else if (b.type === "p") h += `<p>${inline(b.text)}</p>`;
     else if (b.type === "img") {
       const src = /^https?:/.test(b.src) ? b.src : "data/" + b.src.replace(/^\/+/, "");
-      h += `<figure><a href="${esc(src)}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(src)}" alt="${esc(stripInline(b.alt))}"></a>${b.alt ? `<figcaption>${inline(b.alt)}</figcaption>` : ""}</figure>`;
+      const wh = (doc.imgs || {})[b.src.replace(/^\/+/, "")];
+      h += `<figure><a href="${esc(src)}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(src)}"${wh ? ` width="${wh[0]}" height="${wh[1]}"` : ""} alt="${esc(stripInline(b.alt))}"></a>${b.alt ? `<figcaption>${inline(b.alt)}</figcaption>` : ""}</figure>`;
     }
     else if (b.type === "quote") h += `<blockquote>${b.text.split("\n").map(inline).join("<br>")}</blockquote>`;
     else if (b.type === "table") {
@@ -183,6 +184,34 @@ function markInDom(root, terms) {
   }
 }
 
+/* ---------------- 閱讀位置 ---------------- */
+// 記住每份講義看到哪個標題（以標題為錨點，圖片載入也不會跑位），切到其他分頁再回來時接著看
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* 私密模式等情況下略過 */ } },
+};
+const TOP = 64; // 上方固定列的高度
+const onDocRoute = () => /^#\/d\//.test(location.hash);
+const docIdFromHash = () => { const m = location.hash.match(/^#\/d\/([^/?]+)/); return m ? decodeURIComponent(m[1]) : null; };
+function savePos() {
+  const id = docIdFromHash();
+  if (!id || !DOCS.has(id) || !$("#note")) return;
+  let anchor = null;
+  for (const el of view.querySelectorAll(".note h1[id], .note h2[id], .note h3[id], #mynote")) {
+    if (el.getBoundingClientRect().top <= TOP + 4) anchor = el; else break;
+  }
+  store.set("pos:" + id, anchor ? { hid: anchor.id, off: Math.round(anchor.getBoundingClientRect().top), y: Math.round(scrollY) } : { y: Math.round(scrollY) });
+  store.set("lastDoc", id);
+}
+function restorePos(id) {
+  const pos = store.get("pos:" + id);
+  const el = pos?.hid && document.getElementById(pos.hid);
+  if (el) window.scrollTo(0, el.getBoundingClientRect().top + scrollY - pos.off);
+  else window.scrollTo(0, pos?.y || 0);
+}
+let posTimer;
+window.addEventListener("scroll", () => { clearTimeout(posTimer); posTimer = setTimeout(savePos, 150); }, { passive: true });
+
 /* ---------------- views ---------------- */
 function setTab(name) { document.querySelectorAll(".tabbar a").forEach(a => a.classList.toggle("active", a.dataset.tab === name)); }
 
@@ -192,7 +221,14 @@ function homeView() {
   const cats = ["全部", ...CATEGORIES.filter(c => docs.some(d => catOf(d) === c)), ...new Set(docs.map(catOf).filter(c => !CATEGORIES.includes(c)))];
   const shown = docs.filter(d => filterCat === "全部" || catOf(d) === filterCat);
   const count = s => docs.filter(d => (st(d.id).status || "unread") === s).length;
-  let h = `<div class="chips">${cats.map(c => `<button class="chip${c === filterCat ? " on" : ""}" data-cat="${esc(c)}">${esc(c)}</button>`).join("")}</div>`;
+  let h = "";
+  const last = store.get("lastDoc");
+  if (last && DOCS.has(last)) {
+    const d = DOCS.get(last), pos = store.get("pos:" + last);
+    const head = pos?.hid === "mynote" ? { path: ["我的筆記"] } : parse(d).heads.find(x => x.id === pos?.hid);
+    h += `<a class="card resume" href="#/d/${encodeURIComponent(last)}"><span class="t"><small>📖 繼續閱讀</small><b>${esc(d.title)}</b>${head ? `<small>上次看到：${esc(head.path.join(" › "))}</small>` : ""}</span><span class="go">›</span></a>`;
+  }
+  h += `<div class="chips">${cats.map(c => `<button class="chip${c === filterCat ? " on" : ""}" data-cat="${esc(c)}">${esc(c)}</button>`).join("")}</div>`;
   h += `<div class="stats">共 ${docs.length} 份講義 · 已讀 ${count("read")} · 已複習 ${count("reviewed")}${LIB.generated ? ` · 更新於 ${esc(LIB.generated.slice(0, 10))}` : ""}</div>`;
   if (!docs.length) h += `<p class="pad muted">還沒有整理好的講義。</p>`;
   const groups = {};
@@ -208,6 +244,7 @@ function homeView() {
   }
   view.innerHTML = h;
   view.querySelectorAll(".chip").forEach(b => b.onclick = () => { filterCat = b.dataset.cat; homeView(); });
+  window.scrollTo(0, 0);
 }
 
 function docView(id, hid, q) {
@@ -258,7 +295,8 @@ function docView(id, hid, q) {
   if (hid) {
     const el = document.getElementById(hid);
     if (el) { el.scrollIntoView({ block: "start" }); el.classList.add("flash"); }
-  } else window.scrollTo(0, 0);
+  } else restorePos(id);
+  store.set("lastDoc", id);
 }
 
 function bindEditor(id) {
@@ -416,6 +454,12 @@ function route() {
   else homeView();
 }
 window.addEventListener("hashchange", route);
+// 「講義」分頁：不在講義裡時，回到上次看的講義與位置；已經在講義裡時，回到講義列表
+$('.tabbar a[data-tab="home"]').onclick = e => {
+  e.preventDefault();
+  const last = store.get("lastDoc");
+  location.hash = !onDocRoute() && last && DOCS.has(last) ? "#/d/" + encodeURIComponent(last) : "#/";
+};
 $("#searchForm").onsubmit = e => { e.preventDefault(); const q = $("#q").value.trim(); if (q) location.hash = "#/search?q=" + encodeURIComponent(q); $("#q").blur(); };
 
 /* ---------------- sync (Firebase) ---------------- */
