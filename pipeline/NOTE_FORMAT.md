@@ -7,7 +7,7 @@
 ---
 id: <Google Drive 檔案 ID>
 title: <簡潔標題，去掉副檔名與 (1) 之類的副本標記>
-category: <心臟|胸腔|腸胃肝膽|腎臟|內分泌新陳代謝|血液腫瘤|感染|風濕免疫過敏|神經|皮膚|重症急診|綜合其他>
+category: <心臟|胸腔|腸胃肝膽|腎臟|內分泌新陳代謝|血液腫瘤|感染|風濕免疫過敏|神經|精神|皮膚|重症急診|綜合其他>
 source: <原始檔名>
 drive_modified: <Drive 的 modifiedTime，ISO 格式>
 summarized: <整理日期 YYYY-MM-DD>
